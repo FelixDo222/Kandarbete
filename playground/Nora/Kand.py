@@ -18,6 +18,7 @@ SAVE_TO_DISK    = True
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   # cap queued tasks to control RAM
 
+print("Hej Felix 2")
 
 # Thread-safe file handle 
 # Each thread gets its own rasterio handle — avoids thread-safety issues
