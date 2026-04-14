@@ -19,7 +19,7 @@ def tile_tiff(input_path, output_dir, tile_size, overlap):
     
     stride = tile_size - overlap 
 
-
+#penis
     
     tile_count = 0
     for y in range(0, height - tile_size + 1, stride):
