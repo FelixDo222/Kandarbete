@@ -5,8 +5,8 @@ import rasterio
 from rasterio.windows import Window
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-FILE_PATH       = "25FU1231.tif"
+print("ello world")
+FILE_PATH       = "data/h.tiff"
 TILE_SIZE       = 1024          
 OVERLAP         = 64           
 MAX_WORKERS     = min(6, os.cpu_count())
