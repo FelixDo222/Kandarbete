@@ -6,8 +6,9 @@ from rasterio.windows import Window
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
 FILE_PATH       = "data/25FU1231.tif"
-TILE_SIZE       = 512          
+TILE_SIZE       = 512          #1280 x 720 px 
 OVERLAP         = 64           
 MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
 MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
@@ -17,6 +18,8 @@ SAVE_TO_DISK    = True
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
 _thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
+
+print("Test test")
 
 def get_ds(): #opens .tif file once/thread, then reuses it
     """Return this thread's open rasterio dataset (opened once, reused)."""
@@ -169,4 +172,3 @@ def run_pipeline():
 
 
 tiles = run_pipeline()
-print("hello world2")
