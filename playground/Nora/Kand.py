@@ -19,7 +19,7 @@ OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
 _thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
 
-print("Test test")
+print("Noratest3000")
 
 def get_ds(): #opens .tif file once/thread, then reuses it
     """Return this thread's open rasterio dataset (opened once, reused)."""
