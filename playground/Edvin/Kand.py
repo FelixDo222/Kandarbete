@@ -6,9 +6,11 @@ from rasterio.windows import Window
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-FILE_PATH       = "25FU1231.tif"
-TILE_SIZE       = 512          
-OVERLAP         = 64           
+
+FILE_PATH       = "data/h.tiff"
+TILE_W          = 1280
+TILE_H          = 720
+OVERLAP         = 64       
 MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
 MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
 BG_WHITE        = 230  #pixels above this = white background
@@ -16,13 +18,13 @@ BG_BLACK        = 10   #pixels below this = black background
 SAVE_TO_DISK    = True         
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
-_thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
+thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
 
-def get_ds(): #opens .tif file once/thread, then reuses it
+def get_dataset(): #opens .tif file once/thread, then reuses it
     """Return this thread's open rasterio dataset (opened once, reused)."""
-    if not hasattr(_thread_local, "ds"):
-        _thread_local.ds = rasterio.open(FILE_PATH)
-    return _thread_local.ds
+    if not hasattr(thread_local, "ds"):
+        thread_local.ds = rasterio.open(FILE_PATH)
+    return thread_local.ds
 
 # Tile coordinate generator
 def iter_tile_coords(width, height):
@@ -32,22 +34,22 @@ def iter_tile_coords(width, height):
     - For each position it clamps to image bounds so edge tiles don't go out of range
     - Duplicate coordinates (from clamping) are skipped via a seen.
     """
-    step = TILE_SIZE - OVERLAP #512-64 = 448 pixels/step 
+    step_x = TILE_W - OVERLAP
+    step_y = TILE_H - OVERLAP
     seen = set() #ensures no repeated tiles
 
-    for row in range(0, height, step): #
-        for col in range(0, width, step):
-            c = min(col, max(0, width  - TILE_SIZE)) #prevents tiles from going outside the image
-            r = min(row, max(0, height - TILE_SIZE))
+    for row in range(0, height, step_y):
+        for col in range(0, width, step_x):
+            c = min(col, max(0, width  - TILE_W))
+            r = min(row, max(0, height - TILE_H))
 
             if (c, r) in seen:
                 continue
             seen.add((c, r))
 
-            #Actual tile size (edge tiles may be smaller)
-            w = min(TILE_SIZE, width  - c)
-            h = min(TILE_SIZE, height - r)
-            yield c, r, w, h #(x, y, width, height)
+            w = min(TILE_W, width  - c)
+            h = min(TILE_H, height - r)
+            yield c, r, w, h
 
 #Background filter 
 def is_background(arr):
@@ -64,25 +66,26 @@ def is_background(arr):
     tissue_frac = min(not_white, not_black) #must pass both checks
     return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
 
-def read_tile(col, row, w, h): #(x,y,width, height)
+def read_tile(col, row, w, h): #(x,y,width,height)
     """
     Read one tile using rasterio's window and return a uint8 numpy array (H, W, C).
     Returns None if the tile is background.
     """
-    ds   = get_ds()  #dataset, image but not loaded into RAM
-    data = ds.read(window=Window(col, row, w, h))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+    ds   = get_dataset()  #dataset, image but not loaded into RAM
+    r_top = ds.height - row - h
+    data = ds.read(window=Window(col, r_top, w, h))  #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+
+    
     arr  = np.moveaxis(data, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
     if arr.dtype == np.uint16:
-        arr = (arr / 257).astype(np.uint8)  #scale 0-65535 to 0-255
-    elif arr.dtype != np.uint8:   #if other -> scale to 0-255 
+        arr = (arr / 257).astype(np.uint8)  #16-bit (0-65535) → 8-bit (0-255), 257 = 65535/25
+    elif arr.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
         lo, hi = arr.min(), arr.max()
         arr = ((arr - lo) / (hi - lo + 1e-9) * 255).astype(np.uint8)
-
     if is_background(arr):
         return None
-
     return arr
 
 #Worker function (runs in each thread) 
@@ -99,11 +102,7 @@ def process_tile(col, row, w, h):
         if SAVE_TO_DISK:
             OUTPUT_DIR.mkdir(exist_ok=True)
             from PIL import Image
-            Image.fromarray(arr).save(
-                OUTPUT_DIR / f"tile_{row:06d}_{col:06d}.png",
-                compress_level=1   #fast lossless PNG
-            )
-
+            Image.fromarray(arr).convert("RGB").save(OUTPUT_DIR / f"tile_{row:06d}_{col:06d}.jpg", quality=90)
         return {"col": col, "row": row, "tile": arr} #position + image
 
     except Exception as e:
@@ -122,22 +121,20 @@ def run_pipeline():
     coords = list(iter_tile_coords(width, height))
     total  = len(coords)
     print(f"Image   : {width} x {height} px")
-    print(f"Tiles   : {total}  ({TILE_SIZE}px, {OVERLAP}px overlap)")
+    print(f"Tiles   : {total}  ({TILE_W}x{TILE_H}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
     print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
 
     results = []
     skipped = 0
     done    = 0
-
     #Thread pool to process tiles in parallel with a memory brake
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool: 
         futures = []
         for col, row, w, h in coords:
             futures.append(pool.submit(process_tile, col, row, w, h)) #each tile becomes a task
-
-            # Memory brake: drain batch before queuing more
-            # Prevents thousands of tile arrays accumulating in RAM
+            #Memory brake: drain batch before queuing more
+            #Prevents thousands of tile arrays accumulating in RAM
             if len(futures) >= MAX_IN_FLIGHT:
                 for fut in as_completed(futures):
                     res = fut.result()
@@ -168,3 +165,5 @@ def run_pipeline():
     return results
 
 tiles = run_pipeline()
+
+
