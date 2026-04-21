@@ -60,7 +60,7 @@ def read_tile(column_pos, row_pos, tile_width, tile_height): #(x,y,width, height
 
     #Normalise to uint8 if needed
     if tile_data.dtype == np.uint16: 
-        tile_data = (tile_data / 257).astype(np.uint8)  #scale 0-65535 to 0-255
+        tile_data = (tile_data / 256).astype(np.uint8)  #scale 0-65535 to 0-255
     elif tile_data.dtype != np.uint8:   #if other -> scale to 0-255 
         low_color, high_color = tile_data.min(), tile_data.max()
         tile_data = ((tile_data - low_color) / (high_color - low_color + 1e-9) * 255).astype(np.uint8)
