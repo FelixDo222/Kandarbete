@@ -4,123 +4,137 @@ import numpy as np #handles arrays, used for image processing
 import rasterio #reads big .tif images efficiently
 from rasterio.windows import Window
 from pathlib import Path
+from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
 FILE_PATH       = "data/25FU1231.tif"
-TILE_W          = 1280
-TILE_H          = 720
+TILE_X          = 1280
+TILE_Y          = 720
 OVERLAP         = 64       
 MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
-MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
-BG_WHITE        = 230  #pixels above this = white background
-BG_BLACK        = 10   #pixels below this = black background
 SAVE_TO_DISK    = True         
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
-thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
+thread_local = threading.local() #each thread gets its own rasterio handle/ref to file, avoids thread-safety issues
 
-def get_dataset(): #opens .tif file once/thread, then reuses it
+def get_dataset(): 
     """Return this thread's open rasterio dataset (opened once, reused)."""
-    if not hasattr(thread_local, "ds"):
-        thread_local.ds = rasterio.open(FILE_PATH)
+    if not hasattr(thread_local, "ds"): #checks if current thread already has a dataset stored
+        thread_local.ds = rasterio.open(FILE_PATH) #rasterio dataset object
     return thread_local.ds
 
-# Tile coordinate generator
-def iter_tile_coords(width, height):
+#Tile coordinate generator
+def iter_tile_coords(image_width, image_height):
     """
     Generates (col, row, w, h) for every tile position in the image.
     - Slides a window across image in 960 pixel steps, producing overlap    
     - For each position it clamps to image bounds so edge tiles don't go out of range
     - Duplicate coordinates (from clamping) are skipped via a seen.
     """
-    step_x = TILE_W - OVERLAP
-    step_y = TILE_H - OVERLAP
+    step_y = TILE_Y - OVERLAP
+    step_x = TILE_X - OVERLAP
     seen = set() #ensures no repeated tiles
 
-    for row in range(0, height, step_y):
-        for col in range(0, width, step_x):
-            c = min(col, max(0, width  - TILE_W))
-            r = min(row, max(0, height - TILE_H))
+    for y in range(0, image_height, step_y):
+        for x in range(0, image_width, step_x):
+            #Basically: if tile would go off the edge, snap it back so it fits exactly inside
+            y_pos = min(y, max(0, image_height  - TILE_Y)) #clamping, keeping tiles inside image bounds
+            x_pos = min(x, max(0, image_width - TILE_X))
 
-            if (c, r) in seen:
+            if (x_pos, y_pos) in seen:
                 continue
-            seen.add((c, r))
+            seen.add((x_pos, y_pos))
 
-            w = min(TILE_W, width  - c)
-            h = min(TILE_H, height - r)
-            yield c, r, w, h
+            tile_len_x = min(TILE_X, image_width  - x_pos)
+            tile_len_y = min(TILE_Y, image_height - y_pos)
+            yield x_pos, y_pos, tile_len_x, tile_len_y
 
 #Background filter 
-def is_background(arr):
+MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
+BG_WHITE        = 230  #pixels above this = white background
+BG_BLACK        = 10   #pixels below this = black background
+def is_background(tile_data):
     """
     Return True if the tile is mostly empty (white or black background).
-    arr shape: (H, W, 3) uint8
     - White background: pixels > BG_WHITE
     - Black background: pixels < BG_BLACK
     A tile needs MIN_TISSUE_FRAC of pixels that are NEITHER white nor black.
     """
-    gray        = arr.mean(axis=2)          #converts RGB to grayscale
+    gray        = tile_data.mean(axis=2)    #converts RGB to grayscale
     not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
     not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
     tissue_frac = min(not_white, not_black) #must pass both checks
     return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
 
-def read_tile(col, row, w, h): #(x,y,width,height)
+def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     """
     Read one tile using rasterio's window and return a uint8 numpy array (H, W, C).
     Returns None if the tile is background.
     """
     ds   = get_dataset()  #dataset, image but not loaded into RAM
-    data = ds.read(window=Window(col, row, w, h))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
-    arr  = np.moveaxis(data, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
+    tile_data_raw = ds.read(window=Window(x_pos, y_pos, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+    tile_data  = np.moveaxis(tile_data_raw, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
-    if arr.dtype == np.uint16:
-        arr = (arr / 257).astype(np.uint8)  #16-bit (0-65535) → 8-bit (0-255), 257 = 65535/25
-    elif arr.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
-        lo, hi = arr.min(), arr.max()
-        arr = ((arr - lo) / (hi - lo + 1e-9) * 255).astype(np.uint8)
-    if is_background(arr):
-        return None
-    return arr
+    if tile_data.dtype == np.uint16:
+        tile_data = (tile_data / 257).astype(np.uint8)  #16-bit (0-65535) → 8-bit (0-255), 257 = 65535/256
+    elif tile_data.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
+        low, high = tile_data.min(), tile_data.max()
+        tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
+    
+    if tile_data.shape[2] == 4: #if RGBA, drop alpha channel
+        tile_data = tile_data[:, :, :3]
+    
+    """Include when wanting to remove background tiles"""
+    #if is_background(tile_data): 
+    #    return None
+    
+    return tile_data
 
 #Worker function (runs in each thread) 
-def process_tile(col, row, w, h):
+def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
     """
     Read tile, check background, optionally save, return result dict.
     Returns None for background or failed tiles.
     """
     try:
-        arr = read_tile(col, row, w, h)
-        if arr is None:
+        tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
+        if tile_data is None:
             return None  #if background tile, skip
-
         if SAVE_TO_DISK:
-            OUTPUT_DIR.mkdir(exist_ok=True)
-            from PIL import Image
-            Image.fromarray(arr).save(OUTPUT_DIR / f"tile_{row:06d}_{col:06d}.jpg", quality=90)
-        return {"col": col, "row": row, "tile": arr} #position + image
+            if TILE_X == tile_len_x and TILE_Y == tile_len_y:
+                OUTPUT_DIR.mkdir(exist_ok=True)
+                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+            else:
+                h, w, c = tile_data.shape
+                right_padding = TILE_X - tile_len_x
+                bottom_padding = TILE_Y - tile_len_y
+                padded = np.full((h + bottom_padding, w + right_padding, c), 255, dtype=tile_data.dtype)
+                padded[:h, :w, :] = tile_data
+                OUTPUT_DIR.mkdir(exist_ok=True)
+                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+            return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
 
     except Exception as e:
-        print(f"  Tile ({col},{row}) failed: {e}")
+        print(f"  Tile ({x_pos},{y_pos}) failed: {e}")
         return None
 
 def run_pipeline():
     """
     Tile the whole image using a thread pool.
-    Returns a list of dicts: [{"col", "row", "tile"}, ...]
+    Returns a list of dicts: [{"x", "y", "tile"}, ...]
     """
     #Open once just to read image dimensions/size
     with rasterio.open(FILE_PATH) as ds:
-        width, height = ds.width, ds.height
+        image_width, image_height = ds.width, ds.height
 
-    coords = list(iter_tile_coords(width, height))
+    coords = list(iter_tile_coords(image_width, image_height))
     total  = len(coords)
-    print(f"Image   : {width} x {height} px")
-    print(f"Tiles   : {total}  ({TILE_W}x{TILE_H}px, {OVERLAP}px overlap)")
+    print(f"Image   : {image_width} x {image_height} px")
+    print(f"Tiles   : {total}  ({TILE_X}x{TILE_Y}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
-    print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
+    
+    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
 
     results = []
     skipped = 0
@@ -128,8 +142,8 @@ def run_pipeline():
     #Thread pool to process tiles in parallel with a memory brake
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool: 
         futures = []
-        for col, row, w, h in coords:
-            futures.append(pool.submit(process_tile, col, row, w, h)) #each tile becomes a task
+        for x_pos, y_pos, tile_len_x, tile_len_y in coords:
+            futures.append(pool.submit(process_tile, x_pos, y_pos, tile_len_x, tile_len_y)) #each tile becomes a task
             #Memory brake: drain batch before queuing more
             #Prevents thousands of tile arrays accumulating in RAM
             if len(futures) >= MAX_IN_FLIGHT:
@@ -162,3 +176,12 @@ def run_pipeline():
     return results
 
 tiles = run_pipeline()
+
+"""
+from API_client.client import api
+
+with api.create_session() as session:
+    # Replace `function` with the name of the specific API function you wish to call
+    response = api.function(session, "other_required_field")
+    # Here, you can process the response as per your requirements
+"""
