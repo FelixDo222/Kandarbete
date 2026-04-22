@@ -8,6 +8,7 @@ from PIL import Image
 from API_client.client import api
 from uuid import uuid4
 
+
 FILE_PATH       = "data/h.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
