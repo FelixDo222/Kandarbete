@@ -5,13 +5,15 @@ import rasterio #reads big .tif images efficiently
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
+from API_client.client import api
+from uuid import uuid4
 
 FILE_PATH       = "data/h.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
-OVERLAP         = 64       
+OVERLAP         = 64      
 MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
-SAVE_TO_DISK    = True         
+SAVE_TO_DISK    = True       
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
 thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
@@ -34,7 +36,7 @@ def iter_tile_coords(image_width, image_height):
     step_x = TILE_SIZE_X - OVERLAP
     seen = set() #ensures no repeated tiles
     
-    for y in range(0, image_height, step_y):
+    for y in reversed(range(0, image_height, step_y)):
         for x in range(0, image_width, step_x):
             y_pos = y
             x_pos = x
@@ -55,8 +57,8 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     Returns None if the tile is background.
     """
     ds   = get_dataset()  #dataset, image but not loaded into RAM
-    y_pos_temp = ds.height - y_pos  - tile_len_y
-    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos_temp, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+    #y_pos_temp = ds.height - y_pos  - tile_len_y
+    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
     tile_data = np.moveaxis(tile_data_raw, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
@@ -88,6 +90,7 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
                 OUTPUT_DIR.mkdir(exist_ok=True)
                 Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{x_pos:06d}_{y_pos:06d}.jpg", quality=95)
+                api_call(x_pos, y_pos)
             else:
                 height, width, channel = tile_data.shape
                 right_padding = TILE_SIZE_X - tile_len_x
@@ -159,9 +162,26 @@ def run_pipeline():
     print(f"Ready to send : {len(results)} tiles")
     return results
 
+def api_call(x_pos, y_pos):
+    with api.create_session() as session:
+        tile_name = f"tile_{x_pos}_{y_pos}"
+
+
+        slide = api.SlideInput(
+            code=tile_name, 
+            study_id=78,
+            slide_suffix="default",   # Replace with actual suffix (e.g., '.jpg')
+            notes="Auto-generated tile", # Replace with relevant notes
+            sample_type_id=1          # Replace with the correct ID for your samples
+        )
+        created_slide = api.create_slide(session, slide)
 
 
 tiles = run_pipeline()
+
+    
+
+
 
 """""___Background Filter___"
 
