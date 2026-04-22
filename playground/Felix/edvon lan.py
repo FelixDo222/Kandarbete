@@ -6,7 +6,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
-FILE_PATH       = "data/h.tiff"
+FILE_PATH       = "data/file_example_TIFF_10MB.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
 OVERLAP         = 64       
@@ -32,19 +32,10 @@ def iter_tile_coords(image_width, image_height):
     """
     step_y = TILE_SIZE_Y - OVERLAP
     step_x = TILE_SIZE_X - OVERLAP
-    seen = set() #ensures no repeated tiles
-    for y in range(0, image_height, step_y):
-        for x in range(0, image_width, step_x):
-            y_pos = y
-            x_pos = x
-
-            if (x_pos, y_pos) in seen:
-                continue
-            seen.add((x_pos, y_pos))
-
+    for y_pos in range(0, image_height, step_y):
+        for x_pos in range(0, image_width, step_x):
             tile_len_x = min(TILE_SIZE_X, image_width  - x_pos)
             tile_len_y = min(TILE_SIZE_Y, image_height - y_pos)
-
             yield x_pos, y_pos, tile_len_x, tile_len_y
 
 
@@ -54,7 +45,8 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     Returns None if the tile is background.
     """
     ds   = get_dataset()  #dataset, image but not loaded into RAM
-    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+    y_pos_temp = ds.height - y_pos  - tile_len_y
+    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos_temp, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
     tile_data = np.moveaxis(tile_data_raw, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
@@ -63,6 +55,7 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     elif tile_data.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
         low, high = tile_data.min(), tile_data.max()
         tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
+    
     if tile_data.shape[2] == 4:
         tile_data = tile_data[:, :, :3]
     return tile_data
@@ -75,19 +68,18 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
     """
     try:
         tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
-
         if SAVE_TO_DISK:
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
             else:
-                H, W, C = tile_data.shape
+                height, width, channel = tile_data.shape
                 right_padding = TILE_SIZE_X - tile_len_x
                 bottom_padding = TILE_SIZE_Y - tile_len_y
-                padded = np.full((H + bottom_padding, W + right_padding, C), 255, dtype=tile_data.dtype)
-                padded[:H, :W, :] = tile_data
+                padded = np.full((height + bottom_padding, width + right_padding, channel), 255, dtype=tile_data.dtype)
+                padded[bottom_padding:, :width, :] = tile_data
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
             return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
 
     except Exception as e:
@@ -109,7 +101,8 @@ def run_pipeline():
     print(f"Tiles   : {total}  ({TILE_SIZE_X}x{TILE_SIZE_Y}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
     
-    
+    "___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
+    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
 
     results = []
     skipped = 0
@@ -172,16 +165,14 @@ def is_background(tile_data):
     not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
     not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
     tissue_frac = min(not_white, not_black) #must pass both checks
-    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile"""
-
-"___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
+    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
     
-    #run_pipeline()
-    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
-
-            #if tile_data is None:
-            #return None  #if background tile, skip
-
-
-    #if is_background(tile_data):
-        #return None
+    ___In read_tile()___
+    if is_background(tile_data):
+        return None
+    
+     __In process_tile()___       
+    if tile_data is None:
+        return None  #if background tile, skip
+    
+    """
