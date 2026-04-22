@@ -6,7 +6,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
-FILE_PATH       = "data/file_example_TIFF_10MB.tiff"
+FILE_PATH       = "data/h.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
 OVERLAP         = 64       
