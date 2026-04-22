@@ -12,7 +12,7 @@ TILE_SIZE_Y     = 720
 OVERLAP         = 64       
 MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
 SAVE_TO_DISK    = True         
-OUTPUT_DIR      = Path("tile")
+OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
 thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
 
@@ -35,8 +35,8 @@ def iter_tile_coords(image_width, image_height):
     seen = set() #ensures no repeated tiles
     for y in range(0, image_height, step_y):
         for x in range(0, image_width, step_x):
-            y_pos = min(y, max(0, image_height - TILE_SIZE_Y))
-            x_pos = min(x, max(0, image_width  - TILE_SIZE_X))
+            y_pos = y
+            x_pos = x
 
             if (x_pos, y_pos) in seen:
                 continue
@@ -46,32 +46,6 @@ def iter_tile_coords(image_width, image_height):
             tile_len_y = min(TILE_SIZE_Y, image_height - y_pos)
 
             yield x_pos, y_pos, tile_len_x, tile_len_y
-
-
-
-
-"""___Background Filter___"""
-
-MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
-BG_WHITE        = 230  #pixels above this = white background
-BG_BLACK        = 10   #pixels below this = black background
-
-def is_background(tile_data):
-    """
-    Return True if the tile is mostly empty (white or black background).
-    arr shape: (H, W, 3) uint8
-    - White background: pixels > BG_WHITE
-    - Black background: pixels < BG_BLACK
-    A tile needs MIN_TISSUE_FRAC of pixels that are NEITHER white nor black.
-    """
-    gray        = tile_data.mean(axis=2)          #converts RGB to grayscale
-    not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
-    not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
-    tissue_frac = min(not_white, not_black) #must pass both checks
-    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
-
-
-
 
 
 def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
@@ -89,14 +63,13 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     elif tile_data.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
         low, high = tile_data.min(), tile_data.max()
         tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
-    
     if tile_data.shape[2] == 4:
         tile_data = tile_data[:, :, :3]
-        
+    
     "___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
     #if is_background(tile_data):
         #return None
-    
+    print(tile_data.shape[1])
     return tile_data
 
 #Worker function (runs in each thread) 
@@ -111,9 +84,18 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
             return None  #if background tile, skip
 
         if SAVE_TO_DISK:
-            OUTPUT_DIR.mkdir(exist_ok=True)
-            Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=90)
-        return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
+            if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
+                OUTPUT_DIR.mkdir(exist_ok=True)
+                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+            else:
+                h, w, c = tile_data.shape
+                right_padding = TILE_SIZE_X - tile_len_x
+                bottom_padding = TILE_SIZE_Y - tile_len_y
+                padded = np.full((h + bottom_padding, w + right_padding, c), 255, dtype=tile_data.dtype)
+                padded[:h, :w, :] = tile_data
+                OUTPUT_DIR.mkdir(exist_ok=True)
+                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
+            return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
 
     except Exception as e:
         print(f"  Tile ({x_pos},{y_pos}) failed: {e}")
@@ -176,4 +158,26 @@ def run_pipeline():
     print(f"Ready to send : {len(results)} tiles")
     return results
 
+
+
 tiles = run_pipeline()
+
+"""""___Background Filter___"
+
+MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
+BG_WHITE        = 230  #pixels above this = white background
+BG_BLACK        = 10   #pixels below this = black background
+
+def is_background(tile_data):
+    
+    Return True if the tile is mostly empty (white or black background).
+    arr shape: (H, W, 3) uint8
+    - White background: pixels > BG_WHITE
+    - Black background: pixels < BG_BLACK
+    A tile needs MIN_TISSUE_FRAC of pixels that are NEITHER white nor black.
+
+    gray        = tile_data.mean(axis=2)          #converts RGB to grayscale
+    not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
+    not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
+    tissue_frac = min(not_white, not_black) #must pass both checks
+    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile"""
