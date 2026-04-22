@@ -65,11 +65,6 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
         tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
     if tile_data.shape[2] == 4:
         tile_data = tile_data[:, :, :3]
-    
-    "___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
-    #if is_background(tile_data):
-        #return None
-    print(tile_data.shape[1])
     return tile_data
 
 #Worker function (runs in each thread) 
@@ -80,19 +75,17 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
     """
     try:
         tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
-        if tile_data is None:
-            return None  #if background tile, skip
 
         if SAVE_TO_DISK:
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
                 OUTPUT_DIR.mkdir(exist_ok=True)
                 Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
             else:
-                h, w, c = tile_data.shape
+                H, W, C = tile_data.shape
                 right_padding = TILE_SIZE_X - tile_len_x
                 bottom_padding = TILE_SIZE_Y - tile_len_y
-                padded = np.full((h + bottom_padding, w + right_padding, c), 255, dtype=tile_data.dtype)
-                padded[:h, :w, :] = tile_data
+                padded = np.full((H + bottom_padding, W + right_padding, C), 255, dtype=tile_data.dtype)
+                padded[:H, :W, :] = tile_data
                 OUTPUT_DIR.mkdir(exist_ok=True)
                 Image.fromarray(padded).save(OUTPUT_DIR / f"tile_{y_pos:06d}_{x_pos:06d}.jpg", quality=95)
             return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
@@ -116,8 +109,7 @@ def run_pipeline():
     print(f"Tiles   : {total}  ({TILE_SIZE_X}x{TILE_SIZE_Y}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
     
-    "___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
-    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
+    
 
     results = []
     skipped = 0
@@ -181,3 +173,15 @@ def is_background(tile_data):
     not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
     tissue_frac = min(not_white, not_black) #must pass both checks
     return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile"""
+
+"___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
+    
+    #run_pipeline()
+    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
+
+            #if tile_data is None:
+            #return None  #if background tile, skip
+
+
+    #if is_background(tile_data):
+        #return None
