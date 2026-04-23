@@ -5,16 +5,17 @@ import rasterio #reads big .tif images efficiently
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
+import cv2
 
 FILE_PATH       = "data/file_example_TIFF_10MB.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
 OVERLAP         = 64       
-MAX_WORKERS     = min(6, os.cpu_count()) #parallell threads based on CPU cores
+MAX_WORKERS     = 6 #Based on CPU cores and RAM, adjust if needed.
 SAVE_TO_DISK    = True         
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
-thread_local = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
+thread_local    = threading.local() #each thread gets its own rasterio handle, avoids thread-safety issues
 
 def get_dataset(): #opens .tif file once/thread, then reuses it
     """Return this thread's open rasterio dataset (opened once, reused)."""
@@ -45,8 +46,8 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     Returns None if the tile is background.
     """
     ds   = get_dataset()  #dataset, image but not loaded into RAM
-    y_pos_temp = ds.height - y_pos  - tile_len_y
-    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos_temp, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
+    y_pos_bottom = ds.height - y_pos  - tile_len_y
+    tile_data_raw = ds.read(window=rasterio.windows.Window(x_pos, y_pos_bottom, tile_len_x, tile_len_y))   #only loads a small part of the huge image, data.shape = (channels, height, width), (3, 512, 512)
     tile_data = np.moveaxis(tile_data_raw, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
@@ -56,10 +57,11 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
         low, high = tile_data.min(), tile_data.max()
         tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
     
+    #Converts RBGA to RGB by dropping alpha(A), if present. JPG dosen't support A
     if tile_data.shape[2] == 4:
         tile_data = tile_data[:, :, :3]
     return tile_data
-
+ 
 #Worker function (runs in each thread) 
 def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
     """
@@ -70,16 +72,18 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
         tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
         if SAVE_TO_DISK:
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
+                tile_data = cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR)
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
+                cv2.imwrite(str(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg"), tile_data,[cv2.IMWRITE_JPEG_QUALITY, 95])
             else:
                 height, width, channel = tile_data.shape
                 right_padding = TILE_SIZE_X - tile_len_x
-                bottom_padding = TILE_SIZE_Y - tile_len_y
-                padded = np.full((height + bottom_padding, width + right_padding, channel), 255, dtype=tile_data.dtype)
-                padded[bottom_padding:, :width, :] = tile_data
+                top_padding = TILE_SIZE_Y - tile_len_y
+                padded = np.full((height + top_padding, width + right_padding, channel), 255, dtype=tile_data.dtype)
+                padded[top_padding:, :width, :] = tile_data
+                padded = cv2.cvtColor(padded, cv2.COLOR_RGB2BGR)
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
+                cv2.imwrite(str(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg"), padded,[cv2.IMWRITE_JPEG_QUALITY, 95])
             return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
 
     except Exception as e:
@@ -100,9 +104,6 @@ def run_pipeline():
     print(f"Image   : {image_width} x {image_height} px")
     print(f"Tiles   : {total}  ({TILE_SIZE_X}x{TILE_SIZE_Y}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
-    
-    "___INKLUDERA ENDAST DENNA KOD OM DU SKA TA BORT BAKGRUNDER___"
-    #print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
 
     results = []
     skipped = 0
@@ -143,9 +144,37 @@ def run_pipeline():
     print(f"Ready to send : {len(results)} tiles")
     return results
 
-
-
 tiles = run_pipeline()
 
+"""""___Background Filter___"
 
-print(1)
+MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
+BG_WHITE        = 230  #pixels above this = white background
+BG_BLACK        = 10   #pixels below this = black background
+
+def is_background(tile_data):
+    
+    Return True if the tile is mostly empty (white or black background).
+    arr shape: (H, W, 3) uint8
+    - White background: pixels > BG_WHITE
+    - Black background: pixels < BG_BLACK
+    A tile needs MIN_TISSUE_FRAC of pixels that are NEITHER white nor black.
+
+    gray        = tile_data.mean(axis=2)          #converts RGB to grayscale
+    not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
+    not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
+    tissue_frac = min(not_white, not_black) #must pass both checks
+    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
+    
+    ___In read_tile()___
+    if is_background(tile_data):
+        return None
+    
+    ___In process_tile()___       
+    if tile_data is None:
+        return None  #if background tile, skip
+    
+    ___In run_pipeline()___
+    print(f"Tissue  : keeping tiles with at least {MIN_TISSUE_FRAC*100:.0f}% tissue\n")
+    
+    """
