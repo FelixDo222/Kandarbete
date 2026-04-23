@@ -176,8 +176,8 @@ def api_call(x_pos, y_pos):
             code=tile_name, 
             study_id=78,
             slide_suffix="",   
-            notes="Auto-generated tile", 
-            sample_type_id=uuid4()          #?
+            notes="Slide 1", 
+            sample_type_id=uuid4()         
         )
         created_slide = api.create_slide(session, slide)
 
