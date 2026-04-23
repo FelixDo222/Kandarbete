@@ -4,7 +4,7 @@ import numpy as np #handles arrays, used for image processing
 import rasterio #reads big .tif images efficiently
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image
+from PIL import Image #Jobba med CV2 istället för PIL
 from API_client.client import api
 from uuid import uuid4
 

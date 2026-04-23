@@ -2,7 +2,6 @@ from API_client.client import api
 from API_client.common.models import SlideInput, ScanInput, ImageInput
 from uuid import uuid4
 from datetime import datetime, UTC
-import cv2
 
 image_path = "tiles/tile_000000_000000.jpg"
 img = open(image_path, "rb").read()
@@ -43,3 +42,4 @@ with api.create_session() as session:
     )
     response = api.upload_image_and_metadata(session, image, img)
 
+print(1)
