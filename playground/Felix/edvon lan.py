@@ -147,32 +147,4 @@ def run_pipeline():
 
 tiles = run_pipeline()
 
-"""""___Background Filter___"
 
-MIN_TISSUE_FRAC = 0.05 #keep tiles with at least this fraction of content 
-BG_WHITE        = 230  #pixels above this = white background
-BG_BLACK        = 10   #pixels below this = black background
-
-def is_background(tile_data):
-    
-    Return True if the tile is mostly empty (white or black background).
-    arr shape: (H, W, 3) uint8
-    - White background: pixels > BG_WHITE
-    - Black background: pixels < BG_BLACK
-    A tile needs MIN_TISSUE_FRAC of pixels that are NEITHER white nor black.
-
-    gray        = tile_data.mean(axis=2)          #converts RGB to grayscale
-    not_white   = np.mean(gray < BG_WHITE)  #fraction that is not white/bg
-    not_black   = np.mean(gray > BG_BLACK)  #fraction that is not black/bg
-    tissue_frac = min(not_white, not_black) #must pass both checks
-    return tissue_frac < MIN_TISSUE_FRAC #if less than 5% real content → skip tile
-    
-    ___In read_tile()___
-    if is_background(tile_data):
-        return None
-    
-     __In process_tile()___       
-    if tile_data is None:
-        return None  #if background tile, skip
-    
-    """
