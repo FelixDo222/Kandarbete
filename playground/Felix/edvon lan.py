@@ -4,7 +4,6 @@ import numpy as np #handles arrays, used for image processing
 import rasterio #reads big .tif images efficiently
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image
 import cv2
 
 FILE_PATH       = "data/file_example_TIFF_10MB.tiff"
@@ -72,7 +71,7 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
         tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
         if SAVE_TO_DISK:
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
-                tile_data = cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR)
+                tile_data = cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR) #cv2 expects BGR, not RGB therefore convert before saving
                 OUTPUT_DIR.mkdir(exist_ok=True)
                 cv2.imwrite(str(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg"), tile_data,[cv2.IMWRITE_JPEG_QUALITY, 95])
             else:
