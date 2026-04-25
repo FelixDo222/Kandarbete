@@ -3,12 +3,12 @@ from API_client.common.models import SlideInput, ScanInput, ImageInput
 from uuid import uuid4
 from datetime import datetime, UTC
 
-image_path = "tiles/tile_000000_000000.jpg"
+image_path = "tiles/tile_001216_000656.jpg"
 img = open(image_path, "rb").read()
 date = datetime.now(UTC)
 
 slide =  SlideInput(
-            code="Hello", 
+            code="tile 4", 
             study_id=78,
             slide_suffix="",   
             notes="Test", 
