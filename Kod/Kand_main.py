@@ -4,13 +4,14 @@ import numpy as np #handles arrays, used for image processing
 import rasterio #reads big .tif images efficiently
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image
+import cv2
 
 FILE_PATH       = "data/file_example_TIFF_10MB.tiff"
 TILE_SIZE_X     = 1280
 TILE_SIZE_Y     = 720
 OVERLAP         = 64       
 MAX_WORKERS     = 6 #Based on CPU cores and RAM, adjust if needed.
+JPG_QUALITY     = 95 #1-100, higher is better quality but larger file size
 SAVE_TO_DISK    = True         
 OUTPUT_DIR      = Path("tiles")
 MAX_IN_FLIGHT   = MAX_WORKERS * 3   #cap queued tasks to control RAM
@@ -50,19 +51,18 @@ def read_tile(x_pos, y_pos, tile_len_x, tile_len_y): #(x,y,width,height)
     tile_data = np.moveaxis(tile_data_raw, 0, -1)  #moves channels from position 0 to the end,converts from (C, H, W) → (H, W, C)
 
     #Normalise to uint8 if needed
-    if tile_data.dtype == np.uint16:
-        tile_data = (tile_data / 257).astype(np.uint8)  #16-bit (0-65535) → 8-bit (0-255), 257 = 65535/25
-    elif tile_data.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
+    RGB_scaler = 255
+    if tile_data.dtype != np.uint8:   #only uint8/uint16 expected, if not crash early. uint8 already in 0-255, pass through
         low, high = tile_data.min(), tile_data.max()
-        tile_data = ((tile_data - low) / (high - low + 1e-9) * 255).astype(np.uint8)
+        tile_data = ((tile_data - low) / (high - low + 1e-9) * RGB_scaler).astype(np.uint8)
     
     #Converts RBGA to RGB by dropping alpha(A), if present. JPG dosen't support A
     if tile_data.shape[2] == 4:
-        tile_data = tile_data[:, :, :3]
+        tile_data = np.delete(tile_data, 3, axis=2)
     return tile_data
  
 #Worker function (runs in each thread) 
-def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
+def process_tile(x_pos, y_pos, tile_len_x, tile_len_y, JPG_QUALITY):
     """
     Read tile, check background, optionally save, return result dict.
     Returns None for background or failed tiles.
@@ -71,16 +71,18 @@ def process_tile(x_pos, y_pos, tile_len_x, tile_len_y):
         tile_data = read_tile(x_pos, y_pos, tile_len_x, tile_len_y)
         if SAVE_TO_DISK:
             if TILE_SIZE_X == tile_len_x and TILE_SIZE_Y == tile_len_y:
+                tile_data = cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR) #cv2 expects BGR, not RGB therefore convert before saving
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(tile_data).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
+                cv2.imwrite(str(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg"), tile_data,[cv2.IMWRITE_JPEG_QUALITY, JPG_QUALITY])
             else:
                 height, width, channel = tile_data.shape
                 right_padding = TILE_SIZE_X - tile_len_x
                 top_padding = TILE_SIZE_Y - tile_len_y
-                padded = np.full((height + top_padding, width + right_padding, channel), 255, dtype=tile_data.dtype)
-                padded[top_padding:, :width, :] = tile_data
+                padded_tile = np.full((height + top_padding, width + right_padding, channel), 255, dtype=tile_data.dtype)
+                padded_tile[top_padding:, :width, :] = tile_data
+                padded = cv2.cvtColor(padded_tile, cv2.COLOR_RGB2BGR)
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                Image.fromarray(padded).save(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg", quality=95)
+                cv2.imwrite(str(OUTPUT_DIR / f"tile_Y{y_pos:06d}_X{x_pos:06d}.jpg"), padded,[cv2.IMWRITE_JPEG_QUALITY, JPG_QUALITY])
             return {"x": x_pos, "y": y_pos, "tile": tile_data} #position + image
 
     except Exception as e:
@@ -109,7 +111,7 @@ def run_pipeline():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool: 
         futures = []
         for col, row, w, h in coords:
-            futures.append(pool.submit(process_tile, col, row, w, h)) #each tile becomes a task
+            futures.append(pool.submit(process_tile, col, row, w, h, JPG_QUALITY)) #each tile becomes a task
             #Memory brake: drain batch before queuing more
             #Prevents thousands of tile arrays accumulating in RAM
             if len(futures) >= MAX_IN_FLIGHT:
