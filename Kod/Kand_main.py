@@ -98,40 +98,40 @@ def run_pipeline():
     with rasterio.open(FILE_PATH) as ds:
         image_width, image_height = ds.width, ds.height
 
-    coords = list(iter_tile_coords(image_width, image_height))
-    total  = len(coords)
+    coords = list(iter_tile_coords(image_width, image_height)) #plans cuts, generates every tile position (x,y,w,h) across the image
+    total  = len(coords) #num. of tiles image was divided into
     print(f"Image   : {image_width} x {image_height} px")
     print(f"Tiles   : {total}  ({TILE_SIZE_X}x{TILE_SIZE_Y}px, {OVERLAP}px overlap)")
     print(f"Workers : {MAX_WORKERS}")
-
-    results = []
-    skipped = 0
-    done    = 0
+    
+    results = [] #successfully processd tiles in dict form {x: tile position in original image (left edge), y: tile position in original image (top edge), tile: tile data as numpy array}
+    skipped = 0 #tiles the failed 
+    done    = 0 #finished tiles (success + failed)
     #Thread pool to process tiles in parallel with a memory brake
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool: 
-        futures = []
-        for col, row, w, h in coords:
-            futures.append(pool.submit(process_tile, col, row, w, h, JPG_QUALITY)) #each tile becomes a task
-            #Memory brake: drain batch before queuing more
-            #Prevents thousands of tile arrays accumulating in RAM
-            if len(futures) >= MAX_IN_FLIGHT:
-                for fut in as_completed(futures):
-                    res = fut.result()
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool: #6 independent worker threads
+        futures = [] #"promises" for future results of worker tasks while workers are busy. Holds up to 18 tasks before the brake hits (drains memory before more are added)
+        for x_pos, y_pos, tile_len_x, tile_len_y in coords: #loops thrpugh every tile position
+            futures.append(pool.submit(process_tile, x_pos, y_pos, tile_len_x, tile_len_y)) #submit tile coords to worker, each becomes a task. Worker gives image + position
+            
+            #Memory brake: drain batch before queuing more, prevents thousands of tile arrays accumulating in RAM
+            if len(futures) >= MAX_IN_FLIGHT: #if 18 tasks are waiting then no more tasks are submitted until one/more are done. Less than 18? Drain.
+                for fut in as_completed(futures): #waits for worker to finish
+                    res = fut.result() #reutrn value from process_tile()
                     done += 1
-                    if res is None:
+                    if res is None: #if process_tile() returned None then tile either failed or was blank
                         skipped += 1
                     else:
                         results.append(res)
-                futures = []
+                futures = [] #once all tasks in batch are done, futures are reset so next batch can be submitted
 
                 if done % 1000 == 0:
                     print(f"  Progress: {done}/{total} | skipped {skipped}")
 
-        #Drain any remaining futures after the loop
-        for fut in as_completed(futures): #add valid tiles, count skipped ones
+        #Drain: drains any remaining futures after the loop (i.e if there's less than 18)
+        for fut in as_completed(futures): #same as above
             res = fut.result()
             done += 1
-            if res is None:
+            if res is None: 
                 skipped += 1
             else:
                 results.append(res)
